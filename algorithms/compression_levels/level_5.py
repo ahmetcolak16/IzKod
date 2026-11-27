@@ -1,46 +1,17 @@
 """İzKod seviye 5: blok sınırlarını dinamik programlamayla seçer."""
 
-import csv
-from bisect import bisect_left, bisect_right
-
-from algorithms.compression_levels import level_3, level_4
-from algorithms.izkod.fixed_blocks import BLOCK_SIZE, encode_block
-
-SEARCH_RADIUS = 4 * 1024
-SAMPLE_INTERVAL = 1024
-
-
-def _candidate_layers(record_ends: list[int], size: int) -> list[list[int]]:
-    layers = [[0]]
-
-    for target in range(BLOCK_SIZE, size, BLOCK_SIZE):
-        first = bisect_left(record_ends, target - SEARCH_RADIUS)
-        last = bisect_right(record_ends, min(size - 1, target + SEARCH_RADIUS))
-        if first == last:
-            layers.append([target])
-            continue
-
-        candidates = set()
-        for sample in range(target - SEARCH_RADIUS, target + SEARCH_RADIUS + 1, SAMPLE_INTERVAL):
-            index = bisect_left(record_ends, sample, first, last)
-            nearby = record_ends[max(first, index - 1):min(last, index + 1)]
-            candidates.add(min(nearby, key=lambda offset: abs(offset - sample)))
-
-        layers.append(sorted(candidates))
-
-    layers.append([size])
-    return layers
+from algorithms.compression_levels import level_3
+from algorithms.izkod import adaptive_blocks
 
 
 def _best_boundaries(data: bytes, layers: list[list[int]]) -> list[int]:
     costs = {0: 0}
     predecessors = {}
-
     for layer in layers[1:]:
         next_costs = {}
         for end in layer:
             options = (
-                (cost + len(encode_block(data[start:end], allow_raw=True)), start)
+                (cost + adaptive_blocks.block_cost(data, start, end), start)
                 for start, cost in costs.items()
             )
             next_costs[end], predecessors[end] = min(options)
@@ -53,25 +24,19 @@ def _best_boundaries(data: bytes, layers: list[list[int]]) -> list[int]:
     return boundaries[::-1]
 
 
+def encode_candidate(data: bytes, layers: list[list[int]]) -> bytes:
+    """Aday sınırlar arasındaki en düşük toplam maliyetli arşivi yazar."""
+    return adaptive_blocks.encode_archive(data, _best_boundaries(data, layers))
+
+
 def encode(data: bytes) -> bytes:
-    best_archive = level_4.encode(data)
-    if len(data) <= BLOCK_SIZE:
+    best_archive = level_3.encode(data)
+    layers = adaptive_blocks.candidate_layers(data)
+    if layers is None:
         return best_archive
 
-    try:
-        record_ends = level_4.csv_record_ends(data)
-    except csv.Error:
-        return best_archive
-
-    layers = _candidate_layers(record_ends, len(data))
-    boundaries = _best_boundaries(data, layers)
-    blocks = b"".join(
-        encode_block(data[start:end], allow_raw=True)
-        for start, end in zip(boundaries, boundaries[1:])
-    )
-    if len(level_3.BLOCKS_HEADER) + len(blocks) < len(best_archive):
-        return level_3.BLOCKS_HEADER + blocks
-    return best_archive
+    candidate = encode_candidate(data, layers)
+    return min(best_archive, candidate, key=len)
 
 
 decode = level_3.decode
